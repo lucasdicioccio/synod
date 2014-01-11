@@ -148,23 +148,24 @@ data AcceptorFunctions m v = AcceptorFunctions {
 -- | Increments the Decree value and substitutes the NodeRef for the "lower
 -- bits" of the comparison.
 increment :: NodeRef -> Decree -> Decree
-increment ref Zero = Decree 0 ref
-increment ref (Decree n _) = Decree (n + 1) ref
+increment ref Zero          = Decree 0 ref
+increment ref (Decree n _)  = Decree (n + 1) ref
 
 {-
  - PROPOSER FUNCTIONS
  -}
 
 -- | Runs one round of Proposer.
-propose :: (Monad m) => ProposerState           -- ^ state of the proposer
-                     -> (ProposeFunctions m v)  -- ^ functions to transmit propositions/accepted value
-                     -> v                       -- ^ the value that we try to propose, lazyness is a virtue here because if the value is never used, no-need to compute the value
-                     -> m (ProposerState)
+propose :: (Monad m) => ProposerState         -- ^ state of the proposer
+                     -> ProposeFunctions m v  -- ^ functions to transmit propositions/accepted value
+                     -> v                     -- ^ the value that we try to propose, lazyness is a virtue here because if the value is never used, no-need to compute the value
+                     -> m ProposerState
 propose (ref,num) comm val = do
     sendProposition comm $ InProp $ Proposal (increment ref num)
     responses <- waitAnswers comm
     let (success, maxRspDec) = decide ref num responses
-    if success then sendAccept comm . InAccept $ Accept val maxRspDec
+    if success
+    then sendAccept comm . InAccept $ Accept val maxRspDec
     else reject comm
     return (ref, max num maxRspDec)
 
@@ -172,12 +173,11 @@ decide :: NodeRef -> Decree -> [ProposalResponse] -> AcceptDecision
 decide ref num rsps = 
     let (rejects, promises) = (lefts rsps, rights rsps) in
     let maxDecree = maximum $ num : map (either rejectHighestAccepted promiseHighestAccepted) rsps in
-    let success = length (promises) > length (rejects) in
-    if success then (True, increment ref maxDecree)
-    else (False, increment ref maxDecree)
+    let success = length promises > length rejects in
+    (success, increment ref maxDecree)
 
 -- | Proposer Loop
-proposer :: (Monad m) => NodeRef -> (ProposerFunctions m v) -> m ()
+proposer :: (Monad m) => NodeRef -> ProposerFunctions m v -> m ()
 proposer ref comm = go (ref, Zero)
     where go st0 = do
             (functions, value) <- proposeValue comm
@@ -188,7 +188,7 @@ proposer ref comm = go (ref, Zero)
  -}
 
 -- | Runs one round of Acceptor.
-accept :: (Monad m) => (AcceptorState v)    -- ^ current state of the acceptor
+accept :: (Monad m) => AcceptorState v      -- ^ current state of the acceptor
                     -> AcceptFunctions m v  -- ^ functions to transmit responses/communicate accepted values
                     -> AcceptorInput v      -- ^ input event we are reacting-to
                     -> m (AcceptorState v)
@@ -207,7 +207,7 @@ handlePropositionInput state comm prop = do
 handleProposal :: Proposal -> AcceptorState v -> ProposalResponse
 handleProposal (Proposal dProp) acceptor 
     | highestPromise acceptor == Zero   = Right $ Promise dProp (latestAccepted acceptor)
-    | dProp > (highestPromise acceptor) = Right $ Promise dProp (latestAccepted acceptor)
+    | dProp > highestPromise acceptor   = Right $ Promise dProp (latestAccepted acceptor)
     | otherwise                         = Left  $ Reject dProp (latestAccepted acceptor)
 
 -- | Acceptor Loop
