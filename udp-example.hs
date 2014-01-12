@@ -87,8 +87,8 @@ runProposer port chan peers = do
                             print acc
                             forM_ pairs $ \(addr, sock) -> do
                                 sendTo sock (encode' acc) addr
-                          rejF = do
-                            print $ "rejected"
+                          rejF current = do
+                            print $ "rejected, current is: " ++ show current
 
 sockPeer ::  ServiceName -> IO (SockAddr, Socket)
 sockPeer peer = do 
