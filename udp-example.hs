@@ -10,14 +10,18 @@ import System.Environment
 import Data.Binary (Binary, encode, decode)
 import qualified Data.Map as M
 import Control.Monad
+import Control.Applicative
 import Control.Concurrent
 import Control.Concurrent.Async
 import Control.Concurrent.STM
 import Data.IORef
 import qualified Data.ByteString.Lazy.Char8 as C
 import qualified Data.ByteString.Char8 as BS
+import qualified Data.List as L
+import qualified Data.Map as M
 
 type Value = String
+type Store = M.Map Round Value
 
 lbs2bs :: C.ByteString -> BS.ByteString
 lbs2bs = BS.pack . C.unpack
@@ -32,18 +36,20 @@ decode' :: Binary a => BS.ByteString -> a
 decode' = decode . bs2lbs
 
 main = do
+    store <- newIORef M.empty :: IO (IORef Store)
     remotes@(acceptorPort:_) <- getArgs
     acceptorChan <- newChan :: IO (Chan (AcceptorInput Value, Socket, SockAddr))
     proposerChan <- newChan :: IO (Chan Value)
     forkIO $ listenForCommands acceptorPort acceptorChan
-    forkIO $ runAcceptor acceptorChan
-    forkIO $ runProposer acceptorPort proposerChan remotes
+    forkIO $ runAcceptor store acceptorChan
+    forkIO $ runProposer store acceptorPort proposerChan remotes
     go proposerChan
-    where go chan = do
-            stream <- getContents
-            let vals = lines stream
-            forM_ vals $ \val -> do
-               writeChan chan val
+    where go chan = forever $ do
+            print "forever"
+            stream <- getLine
+            forM_ (lines stream) $ \l -> do
+                let (idxStr,' ':val) = L.break (== ' ') l
+                writeChan chan val
 
 listenForCommands port chan = withSocketsDo $ do
     addrinfos <- getAddrInfo 
@@ -59,16 +65,16 @@ listenForCommands port chan = withSocketsDo $ do
                                 writeChan chan (input,sock,addr)
                                 procMessages sock
 
-runProposer :: String -> Chan Value -> [ServiceName] -> IO ()
-runProposer port chan peers = do
+runProposer :: IORef Store -> String -> Chan Value -> [ServiceName] -> IO ()
+runProposer store port chan peers = do
     let ref = NodeRef (read port)
     portsMap <- mapM sockPeer peers
     proposer ref (functions portsMap)
     where functions pairs = ProposerFunctions input
             where input = do
-                    value <- readChan chan
-                    print $ "Proposing: " ++ value
-                    return (ProposeFunctions sendF waitF pushF rejF, value)
+                    str <- readChan chan
+                    print $ "Proposing: " ++ str
+                    return (ProposeFunctions sendF waitF pushF rejF, str)
                     where sendF prop = do
                             print "Sending proposition:"
                             print prop
@@ -98,14 +104,19 @@ sockPeer peer = do
             let addr = (addrAddress serveraddr)
             return (addr, sock)
 
-runAcceptor ::  Chan (AcceptorInput Value, Socket, SockAddr) -> IO ()
-runAcceptor chan = do
+runAcceptor :: IORef Store -> Chan (AcceptorInput Value, Socket, SockAddr) -> IO ()
+runAcceptor store chan = do
     acceptor functions
     where functions = AcceptorFunctions rcv
           rcv = do
             (input, sock, addr) <- readChan chan
-            let acceptF = AcceptFunctions answer communicate
-                            where communicate :: Decree -> Value -> IO ()
-                                  communicate decree value = print "got value" >> print value
+            let acceptF = AcceptFunctions answer putValue getValue
+                            where putValue :: Decree -> Value -> IO ()
+                                  putValue decree v = do
+                                    modifyIORef store (M.insert (roundNum decree) v)
+                                    print "got value" >> print v
+                                  getValue :: Decree -> IO (Maybe Value)
+                                  getValue decree = do
+                                    M.lookup (roundNum decree) <$> readIORef store
                                   answer prop = print "answering" >> print prop >> void (sendTo sock (encode' prop) addr)
             return (acceptF, input)

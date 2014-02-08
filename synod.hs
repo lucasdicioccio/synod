@@ -5,7 +5,8 @@
 -- made simple" paper from Lamport.
 module Synod (
         NodeRef (..)
-    ,   Decree
+    ,   Decree, Round
+    ,   roundNum
     ,   Proposal
     ,   Promise, Reject
     ,   Accept
@@ -26,17 +27,20 @@ import Data.List (partition, maximumBy)
 import Data.Maybe (fromMaybe)
 import Data.Either (lefts, rights)
 import GHC.Generics (Generic)
+import Common
 
--- | A NodeRef is a value to refer to a node participating in the synod.
--- This NodeRef should be unique to any participating node.
-data NodeRef = NodeRef Int
-    deriving (Show, Eq, Ord, Generic)
+type Round = Int
 
 -- | A Decree is either Zero (i.e., nothing has been decreeted yet) or a decree
 -- number along with the NodeRef. The presence of the NodeRef in the Decree is
 -- to ensure that no two nodes can issue the same Decree object.
-data Decree = Zero | Decree Int NodeRef
+data Decree = Zero Round
+    | Decree Round Int NodeRef
     deriving (Show, Eq, Ord, Generic)
+
+roundNum :: Decree -> Round
+roundNum (Zero r)       = r
+roundNum (Decree r _ _) = r
 
 -- | When iteratively proposing new values, you just need to track the decree
 -- that you should use in your proposal to have some chance of success.
@@ -130,7 +134,8 @@ data ProposerFunctions m v = ProposerFunctions {
 -- | Interface functions that an Acceptor must implment for a single round.
 data AcceptFunctions m v = AcceptFunctions {
       answerProposition :: ProposalResponse v -> m ()
-    , communicateValue  :: Decree -> v -> m ()
+    , putCurrentValue   :: Decree -> v -> m ()
+    , getCurrentValue   :: Decree -> m (Maybe v)
     }
 
 -- | Interface functions required to run a new Acceptor loop.
@@ -148,9 +153,14 @@ data AcceptorFunctions m v = AcceptorFunctions {
 
 -- | Increments the Decree value and substitutes the NodeRef for the "lower
 -- bits" of the comparison.
-increment :: NodeRef -> Decree -> Decree
-increment ref Zero          = Decree 0 ref
-increment ref (Decree n _)  = Decree (n + 1) ref
+incrementDecree :: NodeRef -> Decree -> Decree
+incrementDecree ref (Zero r)        = Decree r 0 ref
+incrementDecree ref (Decree r n _)  = Decree r (n + 1) ref
+
+-- | Increments the Decree's round value
+incrementRound :: Decree -> Decree
+incrementRound (Zero r)          = Zero (r+1)
+incrementRound (Decree r n ref)  = Decree (r+1) n ref
 
 {-
  - PROPOSER FUNCTIONS
@@ -160,10 +170,10 @@ increment ref (Decree n _)  = Decree (n + 1) ref
 propose :: (Monad m) => ProposerState         -- ^ state of the proposer
                      -> ProposeFunctions m v  -- ^ functions to transmit propositions/accepted value
                      -> v                     -- ^ the value that we try to propose, lazyness is a virtue here because if the value is never used, no-need to compute the value
-                     -> m ProposerState
+                     -> m (Bool, Decree)
 propose (ref, num) comm proposedVal = do
 
-    sendProposition comm $ InProp $ Proposal (increment ref num)
+    sendProposition comm $ InProp $ Proposal (incrementDecree ref num)
     responses <- waitAnswers comm
 
     let (success, maxNum, val) = decide (num, proposedVal) responses
@@ -172,7 +182,7 @@ propose (ref, num) comm proposedVal = do
     then sendAccept comm (InAccept $ Accept (fromMaybe proposedVal val) maxNum)
     else reject comm $ val
 
-    return (ref, maxNum)
+    return (success, maxNum)
 
 decide :: (Decree, v) -> [ProposalResponse v] -> AcceptDecision v
 decide (num, val) rsps = 
@@ -187,10 +197,13 @@ decide (num, val) rsps =
 
 -- | Proposer Loop
 proposer :: (Monad m) => NodeRef -> ProposerFunctions m v -> m ()
-proposer ref comm = go (ref, Zero)
+proposer ref comm = go (ref, Zero 0)
     where go st0 = do
             (functions, value) <- proposeValue comm
-            propose st0 functions value >>= go
+            (success, maxNum) <- propose st0 functions value
+            if success
+            then go (ref, incrementRound maxNum)
+            else go (ref, maxNum)
 
 {-
  - ACCEPTOR FUNCTIONS
@@ -204,30 +217,40 @@ accept :: (Monad m) => AcceptorState v      -- ^ current state of the acceptor
 accept state comm (InAccept (Accept val num)) = handleAcceptInput state comm num val
 accept state comm (InProp prop)               = handlePropositionInput state comm prop
 
+-- | Handle case where acceptor received a value agreed upon.
 handleAcceptInput state comm num val = do
-    communicateValue comm num val
-    return $ state { latestAccepted = num , currentValue = Just val }
+    putCurrentValue comm num val
+    return $ state { latestAccepted = num }
 
+-- | Handle case where acceptor received a propoition for a new value
+handlePropositionInput :: Monad m => AcceptorState v
+                                  -> AcceptFunctions m v
+                                  -> Proposal
+                                  -> m (AcceptorState v)
 handlePropositionInput state comm prop = do
-    let rsp = handleProposal prop state
+    val <- getCurrentValue comm $ proposalNumber prop
+    let newVal = decideOnProposal prop state
+    let rsp = maybe newVal rejectExisting val
     answerProposition comm rsp
     return $ either (const state) (\prom -> state { highestPromise = promiseNumber prom}) rsp
 
-handleProposal :: Proposal -> AcceptorState v -> ProposalResponse v
-handleProposal (Proposal dProp) acceptor 
-    | shouldAccept dProp acceptor   = Right $ answer Promise dProp (acceptor { highestPromise = dProp})
-    | otherwise                     = Left $ answer Reject dProp acceptor
+    where rejectExisting val = Left $ Reject (proposalNumber prop) (latestAccepted state, Just val)
+    
 
-    where shouldAccept prop acceptor = (highestPromise acceptor == Zero) ||
-                                       (prop > highestPromise acceptor)
+-- | Decides whether we should accept or reject the proposal.
+decideOnProposal :: Proposal -> AcceptorState v -> ProposalResponse v
+decideOnProposal (Proposal dProp) state 
+    | shouldAccept dProp state      = Right $ answer Promise dProp (state { highestPromise = dProp})
+    | otherwise                     = Left $ answer Reject dProp state
 
-          answer f prop acceptor = f prop ( latestAccepted acceptor 
-                                          , currentValue acceptor)
+-- where shouldAccept prop state = (highestPromise state == Zero) ||
+    where shouldAccept prop state = prop > highestPromise state
+          answer f prop state = f prop (latestAccepted state, currentValue state)
 
 -- | Acceptor Loop
 acceptor :: (Monad m) => AcceptorFunctions m v -> m ()
 acceptor comm = go st0
-    where st0 = AcceptorState Zero Zero Nothing
+    where st0 = AcceptorState (Zero 0) (Zero 0) Nothing
           go state = do
                 (functions, input) <- receiveMessage comm
                 accept state functions input >>= go
