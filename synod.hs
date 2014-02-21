@@ -5,8 +5,9 @@
 -- made simple" paper from Lamport.
 module Synod (
         NodeRef (..)
-    ,   Decree, Round
-    ,   roundNum
+    ,   Decree, InstanceNumber
+    ,   zerothInstance, zerothDecree
+    ,   instanceNumber
     ,   Proposal
     ,   Promise, Reject
     ,   Accept
@@ -29,18 +30,25 @@ import Data.Either (lefts, rights)
 import GHC.Generics (Generic)
 import Common
 
-type Round = Int
+type InstanceNumber = Int
+type DecreeNumber = Int
 
 -- | A Decree is either Zero (i.e., nothing has been decreeted yet) or a decree
 -- number along with the NodeRef. The presence of the NodeRef in the Decree is
 -- to ensure that no two nodes can issue the same Decree object.
-data Decree = Zero Round
-    | Decree Round Int NodeRef
+data Decree = Zero InstanceNumber
+    | Decree InstanceNumber Int NodeRef
     deriving (Show, Eq, Ord, Generic)
 
-roundNum :: Decree -> Round
-roundNum (Zero r)       = r
-roundNum (Decree r _ _) = r
+zerothInstance :: InstanceNumber
+zerothInstance = 0
+
+zerothDecree :: Decree
+zerothDecree  = Zero zerothInstance
+
+instanceNumber :: Decree -> InstanceNumber
+instanceNumber (Zero r)       = r
+instanceNumber (Decree r _ _) = r
 
 -- | When iteratively proposing new values, you just need to track the decree
 -- that you should use in your proposal to have some chance of success.
@@ -173,6 +181,8 @@ propose :: (Monad m) => ProposerState         -- ^ state of the proposer
                      -> m (Bool, Decree)
 propose (ref, num) comm proposedVal = do
 
+    -- TODO split propose phase and accept phase
+    --      distinguishedProposer loop with multi-paxos
     sendProposition comm $ InProp $ Proposal (incrementDecree ref num)
     responses <- waitAnswers comm
 

@@ -3,6 +3,7 @@
 module Instances where
 
 import Synod
+import Omega
 import Data.Binary
 
 instance Binary NodeRef
@@ -13,3 +14,4 @@ instance (Binary v) => Binary (Reject v)
 instance (Binary a) => Binary (Accept a)
 instance (Binary a) => Binary (AcceptorInput a)
 
+instance Binary NodeStates

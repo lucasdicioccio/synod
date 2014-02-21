@@ -2,6 +2,7 @@
 module MRefs where
 
 import Synod
+import Omega
 import Instances
 import Network.Socket hiding (send, sendTo, recv, recvFrom)
 import Network.Socket.ByteString hiding (getContents)
@@ -20,8 +21,8 @@ import qualified Data.ByteString.Char8 as BS
 import qualified Data.List as L
 import qualified Data.Map as M
 
-type Value = String
-type Store = M.Map Round Value
+type Value = Value' String
+type Store = M.Map InstanceNumber Value
 
 lbs2bs :: C.ByteString -> BS.ByteString
 lbs2bs = BS.pack . C.unpack
@@ -43,13 +44,14 @@ main = do
     forkIO $ listenForCommands acceptorPort acceptorChan
     forkIO $ runAcceptor store acceptorChan
     forkIO $ runProposer store acceptorPort proposerChan remotes
-    go proposerChan
-    where go chan = forever $ do
+    readKeyboard proposerChan
+    where readKeyboard :: Chan Value -> IO ()
+          readKeyboard chan = forever $ do
             print "forever"
             stream <- getLine
             forM_ (lines stream) $ \l -> do
                 let (idxStr,' ':val) = L.break (== ' ') l
-                writeChan chan val
+                writeChan chan (Right val)
 
 listenForCommands port chan = withSocketsDo $ do
     addrinfos <- getAddrInfo 
@@ -72,7 +74,7 @@ runProposer store port chan peers = do
     proposer ref (functions portsMap)
     where functions pairs = ProposerFunctions input
             where input = do
-                    str <- readChan chan
+                    (Right str) <- readChan chan
                     print $ "Proposing: " ++ str
                     return (ProposeFunctions sendF waitF pushF rejF, str)
                     where sendF prop = do
@@ -113,10 +115,10 @@ runAcceptor store chan = do
             let acceptF = AcceptFunctions answer putValue getValue
                             where putValue :: Decree -> Value -> IO ()
                                   putValue decree v = do
-                                    modifyIORef store (M.insert (roundNum decree) v)
+                                    modifyIORef store (M.insert (instanceNumber decree) v)
                                     print "got value" >> print v
                                   getValue :: Decree -> IO (Maybe Value)
                                   getValue decree = do
-                                    M.lookup (roundNum decree) <$> readIORef store
+                                    M.lookup (instanceNumber decree) <$> readIORef store
                                   answer prop = print "answering" >> print prop >> void (sendTo sock (encode' prop) addr)
             return (acceptF, input)
