@@ -1,5 +1,5 @@
 
-module MRefs where
+module Main where
 
 import Synod
 import Instances
@@ -31,6 +31,7 @@ encode' = lbs2bs . encode
 decode' :: Binary a => BS.ByteString -> a
 decode' = decode . bs2lbs
 
+main :: IO ()
 main = do
     remotes@(acceptorPort:_) <- getArgs
     acceptorChan <- newChan :: IO (Chan (AcceptorInput Value, Socket, SockAddr))
@@ -92,7 +93,7 @@ runProposer port chan peers = do
 
 sockPeer ::  ServiceName -> IO (SockAddr, Socket)
 sockPeer peer = do 
-            addrinfos <- getAddrInfo Nothing (Just "localhost") (Just peer)
+            addrinfos <- getAddrInfo Nothing (Just "127.0.0.1") (Just peer)
             let serveraddr = head addrinfos
             sock <- socket (addrFamily serveraddr) Datagram defaultProtocol
             let addr = (addrAddress serveraddr)

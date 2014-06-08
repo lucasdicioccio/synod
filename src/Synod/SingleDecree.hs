@@ -3,7 +3,7 @@
 
 -- | Implements the "pure" parts of the single-decree protocol as in "Paxos
 -- made simple" paper from Lamport.
-module Synod (
+module Synod.SingleDecree (
         NodeRef (..)
     ,   Decree
     ,   Proposal
@@ -231,3 +231,4 @@ acceptor comm = go st0
           go state = do
                 (functions, input) <- receiveMessage comm
                 accept state functions input >>= go
+
