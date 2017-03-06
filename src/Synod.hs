@@ -137,7 +137,7 @@ data ProposeFunctions m v = ProposeFunctions {
 
 -- | Interface functions that a DistinguishedProposer must implement for a stream of rounds.
 data DistinguishedProposeFunctions m v = DistinguishedProposeFunctions {
-        nextValue :: m v
+        nextValue               :: m (Maybe v)
     ,   distinguishedSendAccept :: AcceptorInput v -> m ()
     }
 
@@ -218,11 +218,14 @@ propose (ref, num) (comm@ProposeFunctions{..}) proposedVal = do
 distinguishedPropose :: (Grow v, Monad m) =>
   (NodeRef,Decree,v) -> DistinguishedProposeFunctions m v -> m ProposerState
 distinguishedPropose (ref,num,val) (comm@DistinguishedProposeFunctions{..}) = do
-    nextVal <- nextValue
-    let newVal = grow nextVal val
-    let newNum = increment ref num
-    distinguishedSendAccept (InAccept $ Accept newVal newNum)
-    distinguishedPropose (ref,newNum,newVal) comm
+    next <- nextValue
+    case next of
+        Just nextVal -> do
+            let newVal = grow nextVal val
+            let newNum = increment ref num
+            distinguishedSendAccept (InAccept $ Accept newVal newNum)
+            distinguishedPropose (ref,newNum,newVal) comm
+        Nothing -> return (ref,num)
 
 decide :: (Show v) => [Either NoResponse (ProposalResponse v)] -> AcceptDecision v
 decide results = 

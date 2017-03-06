@@ -11,7 +11,7 @@ import qualified Data.List as List
 import Control.Monad (forever, forM, forM_, liftM, void)
 import Control.Concurrent (threadDelay, forkIO, ThreadId)
 import Control.Concurrent.Async (race,mapConcurrently)
-import Control.Concurrent.STM (atomically, orElse, TChan, newTChanIO, readTChan, writeTChan, TVar, newTVarIO, writeTVar, readTVar)
+import Control.Concurrent.STM (atomically, orElse, TChan, newTChanIO, readTChan, writeTChan, TVar, newTVarIO, writeTVar, readTVar, swapTVar, newTVar)
 import Control.DeepSeq (deepseq)
 import Control.Exception (catch, SomeException)
 import qualified Data.ByteString.Lazy.Char8 as C
@@ -160,7 +160,10 @@ runProposer rxTChan answersTChan txTChan valVar portsMap = do
     functions peers = ProposerFunctions input
       where
         input = do
-            value <- nextValueF
+            value <- atomically $ do
+                str <- readTChan rxTChan
+                (Round r rval) <- readTVar valVar
+                return (Round (r+1) str)
             putStrLn $ "~ Proposing: " ++ show value
             return (ProposeFunctions sendF waitF sendAcceptF rejectF, value)
           where
@@ -178,8 +181,11 @@ runProposer rxTChan answersTChan txTChan valVar portsMap = do
             sendAcceptF acc = do
                 putStrLn $ "~ Proposer Accepting the value:" ++ show acc
                 let pairs = map (\p -> (acc, p)) peers
-                atomically $ writeTChan txTChan pairs
-                return (DistinguishedProposeFunctions nextDistinguishedValueF distinguishedAcceptF)
+                x <- atomically $ do
+                    writeTChan txTChan pairs
+                    v0 <- readTVar valVar
+                    newTVar v0
+                return (DistinguishedProposeFunctions (nextDistinguishedValueF x) distinguishedAcceptF)
 
             distinguishedAcceptF acc = do
                 putStrLn $ "~ DistinguishedProposer push the accept:" ++ show acc
@@ -193,15 +199,18 @@ runProposer rxTChan answersTChan txTChan valVar portsMap = do
             rejectF val = do
                 putStrLn $ "~ Proposition Rejected, decided value is: " ++ show val
 
-            nextValueF = atomically $ do
-                str <- readTChan rxTChan
-                (Round r rval) <- readTVar valVar
-                return (Round (r+1) str)
-
-            nextDistinguishedValueF = do
-                val <- nextValueF
-                putStrLn $ "~ DistinguishedProposer next: " ++ show val
-                return val
+            nextDistinguishedValueF mem = do
+		 -- Get next value with increasing round number, if a new value
+		 -- has been pushed to the acceptor since this time, we need to
+		 -- abdicate because this distinguished-accept will fail.
+                (v0,v1,v2) <- atomically $ do
+                   str <- readTChan rxTChan
+                   v1@(Round r rval) <- readTVar valVar
+                   let v2 = (Round (r+1) str)
+                   v0 <- swapTVar mem v2
+                   return $ (v0, v1, v2)
+                putStrLn $ "~ DistinguishedProposer next: " ++ show (v0,v1,v2)
+                if v0 == v1 then return (Just v2) else putStrLn "~ Abdicating" >> return Nothing
 
 -- | Runs an acceptor.
 runAcceptor :: FilePath
@@ -225,7 +234,7 @@ runAcceptor dbPath valVar rxTChan txTChan = do
               where
                 answer :: ProposalResponse Value -> IO ()
                 answer prop = do
-                    putStrLn ("Answering top prop: " ++ show prop)
+                    putStrLn ("Answering top prop: " ++ show (prop, addr, sock))
                     atomically (writeTChan txTChan (prop, (addr, sock)))
 
                 accepted :: Decree -> Value -> IO ()
@@ -235,6 +244,6 @@ runAcceptor dbPath valVar rxTChan txTChan = do
 
                 rejected :: Decree -> Value -> IO ()
                 rejected decree value =
-                    putStrLn $ "~ Rejected value: " ++ show (value, decree)
+                    putStrLn $ "~ Rejected value: " ++ show (value, decree, addr, sock)
 
         return (acceptF, input)
